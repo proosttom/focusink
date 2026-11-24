@@ -1,0 +1,5 @@
+rumps>=0.4
+py2app>=0.28
+pyobjc-framework-ServiceManagement
+numpy
+pillow
