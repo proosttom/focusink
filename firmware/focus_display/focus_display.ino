@@ -64,6 +64,14 @@ BLECharacteristic eventChar;
 
 String lastDrawKey, lastLayoutKey, lastPayload;
 int partialCount = 0;
+uint32_t lastFullAt = 0, drawKeyChangedAt = 0;
+String pendingDrawKey;
+// Refresh policy: everything is drawn with fast, flash-free partial refreshes. A full refresh (the
+// black/white flash) only clears the ghosting that partials slowly build up: after FULL_EVERY text
+// changes, at most once per FULL_MIN_GAP_MS, and only when the text changes (never on a minute tick).
+const int FULL_EVERY = 20;
+const uint32_t FULL_MIN_GAP_MS = 10UL * 60 * 1000;
+const uint32_t SETTLE_MS = 400;  // wait for quick successive updates (task -> Break? -> next) to settle
 volatile uint32_t lastActivity = 0;
 uint32_t lastConnected = 0;
 
@@ -450,6 +458,7 @@ void setup() {
   xTaskCreatePinnedToCore(buttonTask, "buttons", 4096, nullptr, 2, nullptr, 0);
   lastActivity = lastConnected = millis();
   render(true);
+  lastFullAt = millis();
 }
 
 void loop() {
@@ -471,15 +480,17 @@ void loop() {
   long rem = remainingNow();
   int step = st.total > 0 ? (int)(188L * (st.total - max(rem, 0L)) / st.total) / 8 : 0;
   int bat = onBattery() ? batteryPct() / 10 : -1;
-  // Any text change gets a full refresh (partial refreshes leave ghosts of the old text);
-  // only the minute tick, progress bar, battery and link mark use fast partial refreshes.
+  // Partial refreshes for everything; an occasional full refresh clears ghosting (see FULL_EVERY).
   String layoutKey = st.header + "|" + st.body + "|" + st.lines + "|" + st.right + "|" + st.footer + "|" + st.ints;
   String drawKey = layoutKey + "|" + st.right + "|" + st.footer + "|" + timerText(rem) + "|" + st.ints + "|" +
                    connected + "|" + step + "|" + bat;
-  if (drawKey != lastDrawKey) {
-    bool full = layoutKey != lastLayoutKey || partialCount >= 10;
+  if (drawKey != pendingDrawKey) { pendingDrawKey = drawKey; drawKeyChangedAt = millis(); }
+  if (drawKey != lastDrawKey && millis() - drawKeyChangedAt >= SETTLE_MS) {
+    bool textChanged = layoutKey != lastLayoutKey;
+    if (textChanged) partialCount++;
+    bool full = textChanged && partialCount >= FULL_EVERY && millis() - lastFullAt >= FULL_MIN_GAP_MS;
     render(full);
-    partialCount = full ? 0 : partialCount + 1;
+    if (full) { partialCount = 0; lastFullAt = millis(); }
     lastLayoutKey = layoutKey;
     lastDrawKey = drawKey;
   }
