@@ -11,7 +11,7 @@ Coordinates are the board's own (from Waveshare's STEP model):
 Parts:
   body     front + walls, display window, flex buttons, USB-C opening, retro wedge base. Print window-side down.
   carrier  plate the battery lies on, with 4 legs pressing the PCB at its mounting holes. Print plate-side down.
-  lid      covers the whole back, held by 2 M2 countersunk screws (6 mm), one in each end wall in bosses in the long walls. Print outer face down.
+  lid      covers the whole back and carries the rear foot; held by 2 M2 countersunk screws (6 mm), one in each end wall in bosses in the long walls. Print inner face down.
 Stack: front wall | display | PCB | carrier legs | carrier plate | battery | lid.
 """
 import os
@@ -31,7 +31,10 @@ WALL_END = 2.8                          # short end walls: thick enough to take 
 SCREW_H = 5.5                           # pilot hole depth below the wall top (M2 x 6 countersunk)
 PILOT_D = 1.7                           # M2 self-tapping into PETG; 1.6 = tighter, 1.8 = looser
 NUB_GAP = 0.35                          # button nub to switch stem (0.15 kept the switches pressed)
-TILT_DEG = 15                           # lean-back angle when standing
+TILT_DEG = 20                           # lean-back angle when standing
+FOOT_L = 16.0                           # rear foot on the lid: how far it extends the footing back along the desk
+FOOT_H = 12.0                           # how far up the lid the foot's root reaches
+FOOT_T = 3.0                            # thickness of the foot's tip
 BASE_INSET = 1.2                        # base is this much narrower than the case on each side
 
 IN_X0, IN_X1 = -1.1, 34.6               # cavity: PCB + 0.55 to the button stems / 0.6 elsewhere
@@ -56,7 +59,8 @@ DISP_X0, DISP_X1, DISP_Y1 = 1.1, 32.9, 38.1   # display glass outline (bottom ed
 HOLES = [(3.0, -2.3), (31.0, -2.3), (3.0, 41.7), (31.0, 41.7)]   # PCB M2 holes
 BUTTONS_Y = [5.5, 16.0]                 # side switch centres
 BUTTON_Z = 1.4
-USB_CX, USB_CZ, USB_W, USB_H = 16.5, -0.25, 13.0, 7.0
+USB_CX, USB_CZ, USB_W, USB_H = 16.5, -0.25, 14.0, 8.0   # opening in the end wall (plug's metal shell)
+PLUG_W, PLUG_H = 16.0, 9.5             # tunnel through the base, for the cable plug's plastic body
 BAT_CX, BAT_CY = (IN_X0 + IN_X1) / 2, (IN_Y0 + IN_Y1) / 2
 SCREWS = [(BAT_CX, IN_Y0 - 1.0), (BAT_CX, IN_Y1 + 1.0)]   # 2 screws, centre of each end wall (nothing sticks into the cavity)
 OX0, OX1, OY0, OY1 = IN_X0 - WALL, IN_X1 + WALL, IN_Y0 - WALL_END, IN_Y1 + WALL_END
@@ -215,7 +219,8 @@ def make_body():
     body = body.cut(groove)
 
     # USB-C opening, carried through the base so the cable plugs in from underneath
-    body = body.cut(Part.makeBox(USB_W, WALL_END + reach + 3, USB_H, V(USB_CX - USB_W / 2, oy0 - reach - 1.5, USB_CZ - USB_H / 2)))
+    body = body.cut(Part.makeBox(USB_W, WALL_END + 1.5, USB_H, V(USB_CX - USB_W / 2, oy0 - 0.5, USB_CZ - USB_H / 2)))
+    body = body.cut(Part.makeBox(PLUG_W, reach + 2, PLUG_H, V(USB_CX - PLUG_W / 2, oy0 - reach - 2, USB_CZ - PLUG_H / 2)))
     return body.removeSplitter()
 
 
@@ -240,19 +245,24 @@ def make_lid():
         lid = lid.makeFillet(0.6, top)
     except Exception:
         pass
-    # locating lip that drops into the cavity (keeps the lid aligned; the screws hold it)
-    lip_h, lip_w = 1.2, 0.8
-    lip = rbox(IN_X0 + FIT, IN_X1 - FIT, IN_Y0 + FIT, IN_Y1 - FIT, LID_Z0 - lip_h, LID_Z0 + 0.01, IN_R - FIT)
-    lip = lip.cut(rbox(IN_X0 + FIT + lip_w, IN_X1 - FIT - lip_w, IN_Y0 + FIT + lip_w, IN_Y1 - FIT - lip_w,
-                       LID_Z0 - lip_h - 1, LID_Z0 + 1, IN_R - FIT - lip_w))
-    # battery locating rims: end stops, and side rims along the long edges
-    bx0, bx1 = BAT_CX - BAT_W / 2, BAT_CX + BAT_W / 2
-    by0, by1 = BAT_CY - BAT_L / 2 - 0.4, BAT_CY + BAT_L / 2 + 0.4
-    rim_h = 1.2
-    rims = [Part.makeBox(8, 0.5, rim_h, V(x0, y0, LID_Z0 - rim_h))
-            for x0 in (bx0 + 1, bx1 - 9) for y0 in (by0 - 0.5, by1)]
-    rims += [Part.makeBox(0.8, BAT_L - 10, rim_h, V(x0, BAT_CY - BAT_L / 2 + 5, LID_Z0 - rim_h)) for x0 in (bx0 - 0.8, bx1)]
-    lid = fuse(lid, lip, *rims)
+    # Rear foot: continues the desk plane of the base backwards, past the lid, so the battery's weight
+    # can't tip the case over backwards. Same width as the base.
+    import math
+    a = math.radians(TILT_DEG)
+    d = (math.sin(a), math.cos(a))                 # along the desk, towards the back (y, z)
+    n = (math.cos(a), -math.sin(a))                # away from the desk
+    sy, sz = oy0, TOP_Z + 0.3                      # where the base's desk plane crosses the lid's bottom edge
+    cy, cz = sy + FOOT_L * d[0], sz + FOOT_L * d[1]   # foot tip, on the desk
+    foot = prism_yz([(oy0, LID_Z1 - 0.8), (sy, sz), (cy, cz), (cy + FOOT_T * n[0], cz + FOOT_T * n[1]),
+                     (oy0 + FOOT_H, LID_Z1 - 0.8)], ox0 + BASE_INSET, ox1 - BASE_INSET)
+    try:  # round the outer corners of the foot
+        side = [e for e in foot.Edges if abs(e.BoundBox.XMin - e.BoundBox.XMax) < 1e-6 and e.BoundBox.ZMin > LID_Z1]
+        foot = foot.makeFillet(1.0, side)
+    except Exception:
+        pass
+    lid = lid.fuse(foot)
+    # No lip or battery rims: the lid prints inner face down so the foot needs no support. The 2 screws
+    # align it; stick the battery to the carrier with thin double-sided tape.
     # countersunk M2 holes
     for x, y in SCREWS:
         lid = lid.cut(cyl(1.15, x, y, LID_Z0 - 2, LID_Z1 + 1))
@@ -288,7 +298,7 @@ def main():
     oriented = {
         "body": for_print(parts["body"]),                 # window side on the bed
         "carrier": for_print(parts["carrier"], flip=True),  # plate on the bed, legs up
-        "lid": for_print(parts["lid"], flip=True),         # outer face on the bed, rims up
+        "lid": for_print(parts["lid"]),                    # inner face on the bed, foot up
     }
     for name, shape in oriented.items():
         export_stl(shape, os.path.join(HERE, f"focus_case_{name}.stl"))
