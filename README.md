@@ -109,3 +109,7 @@ arduino-cli compile --upload -p /dev/cu.usbmodem* --fqbn esp32:esp32:esp32s3:CDC
 
 - A battery icon shows when running without USB.
 - On battery it deep-sleeps after 15 min without activity while no timer runs, or after 5 min without the Mac. Either button wakes it. On USB it never sleeps.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
