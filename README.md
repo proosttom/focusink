@@ -51,14 +51,14 @@ Target: Ship the BLE display
 | **Complete** (upper, ✓) | complete the task · skip the break |
 | hold **Complete** 1 s | skip the task (no tick, no log) |
 
-During a break, any button ends it. Ticking the running task in any editor also completes it.
+**Restart:** hold both buttons 3 s, then let go. During a break, any button ends it. Ticking the running task in any editor also completes it.
 
 ## Menu bar app
 
 `~/Applications/FocusInk.app`: no Dock icon, no terminal.
 
 - **First launch:** allow Bluetooth, then pick your task file. It's remembered in `~/Library/Application Support/FocusInk/config.json`.
-- **Title:** e.g. `▶ 18m · Write firmware`. `●` ready, `⏸` paused, `☕` break, `⚠︎` display not connected.
+- **Title:** e.g. `▶ 18m · Write firmware`. `●` ready, `⏸` paused, `☕` break, `☾` display asleep (press a button on it), `⚠︎` display not found.
 - **Menu:** Start / Pause (⌘P), Complete (⌘D), Interruption (⌘I), Skip, ±5 min, Today's totals, Choose / Open Task File, Button Presses, Show Live Log, Open at Login.
 - **Time's up** on a timed task: a sound and a notification.
 - **Log:** `~/Library/Logs/FocusInk.log`.
@@ -103,12 +103,15 @@ arduino-cli compile --upload -p /dev/cu.usbmodem* --fqbn esp32:esp32:esp32s3:CDC
 
 - arduino-esp32 4.x core (`BLE.h` API), plus `GxEPD2` and `Adafruit GFX Library`.
 - Pins from Waveshare's `user_config.h`: EPD DC 10, CS 11, SCK 12, MOSI 13, RST 9, BUSY 8, power 6; BOOT 0, PWR 18. Holding PWR is left alone: it's Waveshare's battery power-off.
+- The board restarts itself if it hangs for 30 s, and starts advertising again if Bluetooth stops. After a reconnect the app log shows why it last started, e.g. `(last start: watchdog)`.
 - The device counts on its own and redraws once a minute; the Mac resyncs every 60 s. A `*` in the header means the Bluetooth link is down.
 
 ## Battery
 
 - A battery icon shows when running without USB.
-- On battery it deep-sleeps after 15 min without activity while no timer runs, or after 5 min without the Mac. Either button wakes it. On USB it never sleeps.
+- On battery it deep-sleeps after 15 min without activity while no timer runs, or after 5 min without the Mac. On USB it never sleeps.
+- Any button wakes it, and that press counts: it shows "Connecting..." and the press is delivered once the Mac reconnects (usually within 2 s). Presses made while the link is down are kept for 30 s.
+- Bluetooth advertises fast for a minute after a press, wake-up or disconnect, then slowly to save battery.
 
 ## License
 

@@ -596,12 +596,18 @@ class Link:
         self.on_alert = on_alert or (lambda msg: log(f"\a⏰ {msg}"))
         self.queue: asyncio.Queue = asyncio.Queue()
         self.client: BleakClient | None = None
-        self.status = "starting"  # scanning | connected | not found
+        self.status = "starting"  # scanning | connected | not found | asleep
+        self.asleep = False       # the display said it's going to deep sleep; a button press wakes it
+        self._lost = asyncio.Event()
         self.last_sent = 0.0
         self.last_view = None
 
     def _on_event(self, _, data: bytearray):
         ev = data.decode(errors="ignore").strip()
+        if ev == "sleep":
+            self.asleep = True
+            self.log("Display went to sleep (battery); press a button on it to wake it")
+            return
         if cmd := BUTTONS.get(ev):
             self.log(f"  [{BUTTON_NAMES[ev]}]")
             self.queue.put_nowait(cmd)
@@ -609,19 +615,27 @@ class Link:
     async def _connect_forever(self):
         while True:
             if self.client is None or not self.client.is_connected:
-                self.status = "scanning"
+                self.status = "asleep" if self.asleep else "scanning"
                 dev = await find_device()
                 if not dev:
-                    self.status = "not found"
-                    self.log("Display not found; retrying (timer keeps running).")
-                    await asyncio.sleep(3)
+                    self.status = "asleep" if self.asleep else "not found"
+                    if not self.asleep:
+                        self.log("Display not found; retrying (timer keeps running).")
+                    await asyncio.sleep(1)
                     continue
-                client = BleakClient(dev)
+                client = BleakClient(dev, disconnected_callback=lambda _: self._lost.set())
                 try:
                     await client.connect()
                     await client.start_notify(EVENT_UUID, self._on_event)
                     self.client, self.status = client, "connected"
-                    self.log(f"Connected to {DEVICE_NAME}")
+                    try:  # the display reports why it last (re)started, e.g. "reset:watchdog"
+                        why = (await client.read_gatt_char(EVENT_UUID)).decode(errors="ignore")
+                    except Exception:  # noqa: BLE001
+                        why = ""
+                    why = re.match(r"[\w ()-]*", why.split(":", 1)[1]).group().strip() if why.startswith("reset:") else ""
+                    self.asleep = False
+                    self._lost.clear()
+                    self.log(f"Connected to {DEVICE_NAME}" + (f" (last start: {why})" if why else ""))
                     self.last_view = None
                 except Exception as e:  # noqa: BLE001
                     self.log(f"Connect failed: {e}")
@@ -629,8 +643,13 @@ class Link:
                         await client.disconnect()
                     except Exception:  # noqa: BLE001
                         pass
-                    await asyncio.sleep(2)
-            await asyncio.sleep(1)
+                    await asyncio.sleep(1)
+                continue
+            # connected: wait until the link drops (or check again after 5 s), then rescan right away
+            try:
+                await asyncio.wait_for(self._lost.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
 
     def _handle(self, cmd) -> bool:
         """Apply one command; returns False to quit."""

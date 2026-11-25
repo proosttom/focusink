@@ -17,6 +17,7 @@
 #include <Fonts/FreeSansBold18pt7b.h>
 #include <Fonts/FreeSansBold24pt7b.h>
 #include "esp_sleep.h"
+#include "esp_task_wdt.h"
 #include "driver/rtc_io.h"
 
 // Pins from Waveshare's own examples (02_Example/Arduino/*/user_config.h)
@@ -60,7 +61,22 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 String pending;
 volatile bool hasPending = false;
 volatile bool connected = false;
+volatile bool subscribed = false;   // the Mac listens for button events
 BLECharacteristic eventChar;
+
+// Button presses made while the Mac isn't connected (including the one that woke the board from
+// deep sleep) are kept for QUEUE_MAX_MS and delivered as soon as it is.
+const int QUEUE_LEN = 4;
+const uint32_t QUEUE_MAX_MS = 30000;
+const char *queuedEv[QUEUE_LEN];
+uint32_t queuedAt[QUEUE_LEN];
+volatile int queued = 0;
+portMUX_TYPE qmux = portMUX_INITIALIZER_UNLOCKED;
+
+// Advertising: fast for a while after boot, a press or a disconnect so the Mac finds the board in
+// a second or two; slow otherwise to save battery.
+const uint32_t FAST_ADV_MS = 60000;
+volatile uint32_t fastAdvSince = 0;
 
 String lastDrawKey, lastLayoutKey, lastPayload;
 int partialCount = 0;
@@ -341,11 +357,27 @@ void render(bool full, const String &footerOverride = "") {
 }
 
 // ---- BLE -------------------------------------------------------------------
+const char *resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "restart";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "wake from sleep";
+    case ESP_RST_BROWNOUT: return "brownout (low battery)";
+    case ESP_RST_USB: return "usb";
+    default: return "other";
+  }
+}
+
 void setupBle() {
   BLE.begin("FocusInk");
   BLEServer server = BLE.createServer();
   server.onConnect([](BLEServer &, const BLEConnInfo &) { connected = true; });
-  server.onDisconnect([](BLEServer &, const BLEConnInfo &, uint8_t) { connected = false; });
+  server.onDisconnect([](BLEServer &, const BLEConnInfo &, uint8_t) {
+    connected = subscribed = false;
+    fastAdvSince = millis();
+  });
   server.advertiseOnDisconnect(true);
 
   BLEService svc = server.createService(BLEUUID(SERVICE_UUID));
@@ -359,7 +391,9 @@ void setupBle() {
     portEXIT_CRITICAL(&mux);
   });
   eventChar = svc.createCharacteristic(BLEUUID(EVENT_UUID), BLEProperty::Read | BLEProperty::Notify, BLEPermission::ReadOpen);
-  eventChar.setValue("idle");
+  eventChar.onSubscribe([](BLECharacteristic &, const BLEConnInfo &, uint16_t v) { subscribed = v != 0; });
+  // The Mac reads this once after connecting: why the board last (re)started.
+  eventChar.setValue(String("reset:") + resetReasonName());
   BTStatus status = server.start();
   Serial.printf("server start: %s\n", status.toString());
 
@@ -368,11 +402,40 @@ void setupBle() {
   BLE.startAdvertising();
 }
 
+void queueEvent(const char *ev) {
+  portENTER_CRITICAL(&qmux);
+  if (queued == QUEUE_LEN) {  // drop the oldest
+    for (int i = 1; i < QUEUE_LEN; i++) { queuedEv[i - 1] = queuedEv[i]; queuedAt[i - 1] = queuedAt[i]; }
+    queued--;
+  }
+  queuedEv[queued] = ev; queuedAt[queued] = millis(); queued++;
+  portEXIT_CRITICAL(&qmux);
+}
+
 void sendEvent(const char *ev) {
   lastActivity = millis();
-  Serial.printf("button: %s (connected=%d)\n", ev, (int)connected);
-  if (!connected) return;
-  eventChar.notify((const uint8_t *)ev, strlen(ev));
+  Serial.printf("button: %s (connected=%d, subscribed=%d)\n", ev, (int)connected, (int)subscribed);
+  if (connected && subscribed && !queued) { eventChar.notify((const uint8_t *)ev, strlen(ev)); return; }
+  queueEvent(ev);
+  fastAdvSince = millis();  // be easy to find while the press waits
+}
+
+// Deliver queued presses once the Mac listens again; forget ones older than QUEUE_MAX_MS.
+void flushQueue() {
+  while (queued) {
+    portENTER_CRITICAL(&qmux);
+    const char *ev = queuedEv[0]; uint32_t at = queuedAt[0];
+    bool fresh = millis() - at < QUEUE_MAX_MS;
+    if (fresh && !(connected && subscribed)) { portEXIT_CRITICAL(&qmux); return; }
+    for (int i = 1; i < queued; i++) { queuedEv[i - 1] = queuedEv[i]; queuedAt[i - 1] = queuedAt[i]; }
+    queued--;
+    portEXIT_CRITICAL(&qmux);
+    if (fresh) {
+      Serial.printf("queued: %s\n", ev);
+      eventChar.notify((const uint8_t *)ev, strlen(ev));
+      delay(80);
+    }
+  }
 }
 
 // ---- buttons ---------------------------------------------------------------
@@ -403,14 +466,40 @@ struct Button {
 Button bootBtn{BOOT_BTN, "boot", "boot_long", nullptr};
 Button pwrBtn{PWR_BTN, "pwr", nullptr, "pwr_double"};
 
+// Both buttons held 3 s = restart. The restart happens on release, so BOOT (GPIO0, a strapping
+// pin) isn't held low while the chip comes back up. No single-button events are sent meanwhile.
+const uint32_t COMBO_MS = 3000;
+volatile bool restartRequested = false;
+
 // Poll buttons in their own task so presses aren't lost during a 2 s e-paper refresh.
 void buttonTask(void *) {
-  for (;;) { bootBtn.poll(); pwrBtn.poll(); vTaskDelay(pdMS_TO_TICKS(20)); }
+  uint32_t bothSince = 0;
+  bool armed = false;
+  for (;;) {
+    bool boot = digitalRead(BOOT_BTN) == LOW, pwr = digitalRead(PWR_BTN) == LOW;
+    if (boot && pwr) {
+      if (!bothSince) bothSince = millis();
+      // swallow whatever each button was about to report
+      bootBtn.longSent = true; bootBtn.waiting = false;
+      pwrBtn.longSent = true; pwrBtn.waiting = false; pwrBtn.second = false;
+      if (!armed && millis() - bothSince > COMBO_MS) { armed = true; Serial.println("restart armed"); }
+    } else {
+      bothSince = 0;
+      if (armed && !boot && !pwr) restartRequested = true;
+    }
+    if (!armed) { bootBtn.poll(); pwrBtn.poll(); }
+    else { bootBtn.down = boot; pwrBtn.down = pwr; }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
 }
 
 // ---- deep sleep --------------------------------------------------------------
 void goToSleep() {
   Serial.println("deep sleep");
+  if (connected && subscribed) {  // tell the Mac, so it shows "asleep" instead of a lost link
+    eventChar.notify((const uint8_t *)"sleep", 5);
+    delay(150);
+  }
   render(false, "Asleep - press a button");
   display.hibernate();
   digitalWrite(EPD_PWR, HIGH);
@@ -455,13 +544,58 @@ void setup() {
   display.setRotation(0);
 
   setupBle();
+  fastAdvSince = millis();
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+    // The press that woke the board counts: queue it for the Mac. If the button is still held,
+    // make its release a no-op so it isn't counted twice.
+    uint64_t woke = esp_sleep_get_ext1_wakeup_status();
+    Button &b = (woke & (1ULL << PWR_BTN)) ? pwrBtn : bootBtn;
+    queueEvent(b.shortEv);
+    if (digitalRead(b.pin) == LOW) { b.down = true; b.longSent = true; }
+  }
   xTaskCreatePinnedToCore(buttonTask, "buttons", 4096, nullptr, 2, nullptr, 0);
   lastActivity = lastConnected = millis();
   render(true);
   lastFullAt = millis();
+
+  // If the main loop ever hangs for 30 s (a full refresh takes ~2 s), the watchdog reboots the board.
+  esp_task_wdt_config_t wdt = {.timeout_ms = 30000, .idle_core_mask = 0, .trigger_panic = true};
+  esp_task_wdt_reconfigure(&wdt);
+  enableLoopWDT();
+}
+
+// Bluetooth should advertise again after a disconnect; if it ever stops, restart it.
+void keepAdvertising() {
+  static uint32_t lastCheck = 0;
+  static int speed = -1;  // 1 fast, 0 slow
+  if (connected) { speed = -1; return; }
+  bool fast = millis() - fastAdvSince < FAST_ADV_MS;
+  if ((int)fast != speed) {  // switch interval: stop, set, start
+    BLEAdvertising adv = BLE.getAdvertising();
+    adv.stop();
+    if (fast) adv.setInterval(30, 60); else adv.setInterval(800, 1000);
+    BTStatus st = BLE.startAdvertising();
+    Serial.printf("advertising %s: %s\n", fast ? "fast" : "slow", st.toString());
+    speed = fast;
+    lastCheck = millis();
+    return;
+  }
+  if (millis() - lastCheck < 5000) return;
+  lastCheck = millis();
+  if (!BLE.getAdvertising().isAdvertising()) {
+    BTStatus st = BLE.startAdvertising();
+    Serial.printf("advertising restarted: %s\n", st.toString());
+  }
 }
 
 void loop() {
+  if (restartRequested) {
+    render(true, "Restarting...");
+    delay(200);
+    esp_restart();
+  }
+  keepAdvertising();
+  flushQueue();
   if (hasPending) {
     String p;
     portENTER_CRITICAL(&mux);
@@ -482,14 +616,16 @@ void loop() {
   int bat = onBattery() ? batteryPct() / 10 : -1;
   // Partial refreshes for everything; an occasional full refresh clears ghosting (see FULL_EVERY).
   String layoutKey = st.header + "|" + st.body + "|" + st.lines + "|" + st.right + "|" + st.footer + "|" + st.ints;
+  // While a press waits for the Mac, say so instead of looking frozen.
+  String footerOv = (!connected && queued) ? "Connecting..." : "";
   String drawKey = layoutKey + "|" + st.right + "|" + st.footer + "|" + timerText(rem) + "|" + st.ints + "|" +
-                   connected + "|" + step + "|" + bat;
+                   connected + "|" + step + "|" + bat + "|" + footerOv;
   if (drawKey != pendingDrawKey) { pendingDrawKey = drawKey; drawKeyChangedAt = millis(); }
   if (drawKey != lastDrawKey && millis() - drawKeyChangedAt >= SETTLE_MS) {
     bool textChanged = layoutKey != lastLayoutKey;
     if (textChanged) partialCount++;
     bool full = textChanged && partialCount >= FULL_EVERY && millis() - lastFullAt >= FULL_MIN_GAP_MS;
-    render(full);
+    render(full, footerOv);
     if (full) { partialCount = 0; lastFullAt = millis(); }
     lastLayoutKey = layoutKey;
     lastDrawKey = drawKey;

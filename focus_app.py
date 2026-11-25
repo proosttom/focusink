@@ -207,7 +207,8 @@ class FocusApp(rumps.App):
         self._refresh_presses()
         sp = self.link.sprint
         status = {"connected": "Display: connected", "scanning": "Display: searching…",
-                  "not found": "Display: not found"}.get(self.link.status, "Display: starting…")
+                  "not found": "Display: not found",
+                  "asleep": "Display: asleep — press a button on it"}.get(self.link.status, "Display: starting…")
         self.status_item.title = status
         svc = login_service()
         self.login_item.state = 1 if svc and svc.status() == 1 else 0
@@ -225,7 +226,7 @@ class FocusApp(rumps.App):
             + (f" · plan {fmt_min(s['planned'])} vs real {fmt_min(s['actual_timed'])}" if s["planned"] else "")
             + (f" · ⚡{s['interruptions']}" if s["interruptions"] else "")
         ) if s["count"] else "Today: nothing completed yet"
-        link_mark = "" if self.link.status == "connected" else " ⚠︎"
+        link_mark = {"connected": "", "asleep": " ☾"}.get(self.link.status, " ⚠︎")  # ☾ = asleep, by design
 
         if sp.mode == "start":
             self.title = "◷ Focus?" + link_mark
