@@ -267,7 +267,7 @@ def make_lid():
     for x, y in SCREWS:
         lid = lid.cut(cyl(1.15, x, y, LID_Z0 - 2, LID_Z1 + 1))
         lid = lid.cut(Part.makeCone(1.15, 2.05, 0.9, V(x, y, LID_Z1 - 0.9)))
-        lid = lid.cut(cyl(2.05, x, y, LID_Z1 - 0.001, LID_Z1 + 1))
+        lid = lid.cut(cyl(2.2, x, y, LID_Z1 - 0.001, LID_Z1 + 40))   # access channel through the foot for head + screwdriver
     return lid.removeSplitter()
 
 

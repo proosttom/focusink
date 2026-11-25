@@ -47,7 +47,7 @@ The side buttons are cantilever tabs cut into the wall. Each tab has a small nub
 2. Seat the PCB on the 4 standoffs. The small pins go into the PCB's corner mounting holes. It should drop in without force: there's about 0.6 mm of room on every side and nothing sticks into the opening.
 3. Put the carrier on top, legs on the same 4 holes. It has 0.5 mm of room on every side.
 4. Plug in the battery. Route the lead through the slot in the middle of the carrier or the notch at either end. Lay the battery on the plate.
-5. Put the lid on, foot towards the USB end, and drive in the 2 screws, one in the middle of each end. Stop when they're snug: PETG strips if you overtighten.
+5. Put the lid on, foot towards the USB end, and drive in the 2 screws, one in the middle of each end. The bottom one goes in through the channel in the foot. Stop when they're snug: PETG strips if you overtighten.
 
 To charge, lay it face down on something soft, or on its side. The USB-C port is reached through a tunnel in the base, from underneath. The foot no longer lets it lie on its back.
 
